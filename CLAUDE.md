@@ -4,28 +4,52 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project does
 
-`liqdata.py` connects to the Binance Futures all-market liquidation WebSocket stream (`wss://fstream.binance.com/ws/!forceOrder@arr`) and records every forced liquidation order to daily CSV files in the `liquidations/` directory.
+Continuously collects Binance Futures market data for **BTCUSDT, ETHUSDT, SOLUSDT** and writes it to daily CSV/Parquet files. Three scripts run simultaneously, each gathering a different data type.
 
-## Running
+## Running the scripts
 
 ```bash
-python3 liqdata.py
+python3 liquidation_logger.py   # WebSocket: liquidations + funding rates
+python3 rest_poller.py          # REST polling: OI, L/S ratios, klines, Fear & Greed
+python3 heatmap_logger.py       # REST polling: order book depth → Parquet
 ```
 
-Requires the `websockets` package (`pip install websockets`). No other dependencies beyond the standard library.
+Dependencies: `websockets`, `aiohttp`, `pandas`, `pyarrow` (for Parquet).
 
-## Architecture
+`liqdata.py` is the original prototype for liquidation streaming — superseded by `liquidation_logger.py`.
 
-Single-file script with three layers:
+## Script architecture
 
-1. **WebSocket layer** (`stream_liquidations`): Maintains a persistent connection with auto-reconnect and exponential backoff (5s → 60s cap). Handles both single-event and list-wrapped message formats.
+All scripts use `asyncio.gather` to run coroutines concurrently in a single process. Each coroutine has its own reconnect/retry loop. Files rotate at UTC midnight.
 
-2. **Parse layer** (`parse_message`): Extracts fields from the nested `o` (order) object in each `forceOrder` event. Computes `usd_value = orig_qty × avg_price`.
+### `liquidation_logger.py` — two WebSocket streams
+| Stream | Source | Output | Notes |
+|--------|--------|--------|-------|
+| All-market liquidations | `wss://fstream.binance.com/ws/!forceOrder@arr` | `liquidations/liquidations_YYYY-MM-DD.csv` | Every `forceOrder` event |
+| Mark price / funding rate | `wss://fstream.binance.com/stream?streams=...@markPrice@1s` | `funding_rates/funding_{SYMBOL}_YYYY-MM-DD.csv` | Only writes on funding rate change |
 
-3. **Storage layer** (`write_row` / `get_daily_csv_path`): Appends rows to `liquidations/liquidations_YYYY-MM-DD.csv`, creating a new file with headers each UTC day.
+### `rest_poller.py` — four REST pollers (Binance Futures API + alternative.me)
+| Poller | Endpoint | Interval | Output |
+|--------|----------|----------|--------|
+| Open interest | `/fapi/v1/openInterest` | 60 s | `open_interest/oi_{SYMBOL}_YYYY-MM-DD.csv` |
+| Global L/S ratio | `/futures/data/globalLongShortAccountRatio` | 300 s | `longshort_ratio/ls_{SYMBOL}_YYYY-MM-DD.csv` |
+| Top trader L/S ratio | `/futures/data/topLongShortAccountRatio` | 300 s | `longshort_ratio/ls_{SYMBOL}_YYYY-MM-DD.csv` |
+| 1m klines | `/fapi/v1/klines?interval=1m&limit=1` | 60 s | `klines/klines_{SYMBOL}_YYYY-MM-DD.csv` |
+| Fear & Greed index | `api.alternative.me/fng` | 3600 s | `fear_greed/fng_YYYY-MM-DD.csv` |
 
-## Output format
+Startup is staggered per symbol (2–4 s) to avoid burst requests.
 
-CSV columns: `event_time`, `symbol`, `side` (BUY/SELL), `order_type`, `time_in_force`, `orig_qty`, `price`, `avg_price`, `order_status`, `last_filled_qty`, `filled_accum_qty`, `trade_time`, `usd_value`.
+### `heatmap_logger.py` — order book depth → Parquet
+Polls `/fapi/v1/depth?limit=20` every **0.5 s** per symbol. Rows (timestamp, symbol, side, price, quantity) accumulate in memory and are flushed to **Snappy-compressed Parquet** every **5 minutes** (appended to the daily file). Output: `orderbook_heatmap/orderbook_{SYMBOL}_YYYY-MM-DD.parquet`.
 
-Timestamps are ISO 8601 in UTC. Files rotate at UTC midnight.
+## Output directory map
+
+```
+liquidations/          CSV  — one file per day
+funding_rates/         CSV  — one file per symbol per day
+open_interest/         CSV  — one file per symbol per day
+longshort_ratio/       CSV  — one file per symbol per day (global + top rows mixed)
+klines/                CSV  — one file per symbol per day
+fear_greed/            CSV  — one file per day
+orderbook_heatmap/     Parquet — one file per symbol per day
+```
