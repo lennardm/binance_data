@@ -1,0 +1,5 @@
+aiohttp
+fastparquet
+pandas
+pyarrow
+websockets
