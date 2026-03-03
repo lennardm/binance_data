@@ -1,0 +1,17 @@
+[Unit]
+Description=Binance data collector
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=collector
+Group=collector
+WorkingDirectory=/opt/collector/app
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/collector/secrets.env
+ExecStart=/opt/collector/venv/bin/python /opt/collector/app/main.py
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

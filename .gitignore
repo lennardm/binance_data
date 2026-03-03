@@ -6,3 +6,4 @@ longshort_ratio/
 open_interest/
 orderbook_heatmap/
 .venv/
+secrets.env
